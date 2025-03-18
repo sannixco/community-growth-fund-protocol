@@ -373,3 +373,73 @@
     )
   )
 )
+
+;; Collect funds for a successfully funded project
+(define-public (withdraw-project-funds (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+        (funding-goal (get funding-goal project-data))
+        (available-funds (get current-funding project-data))
+        (project-status (get status project-data))
+      )
+      (asserts! (is-eq tx-sender project-creator) (err ERROR_PERMISSION_DENIED))
+      (asserts! (is-eq project-status "active") (err ERROR_PROJECT_ALREADY_CLOSED))
+      (asserts! (>= available-funds funding-goal) (err ERROR_INSUFFICIENT_FUNDS))
+      (match (as-contract (stx-transfer? available-funds tx-sender project-creator))
+        success
+          (begin
+            (map-set Projects
+              { id: id }
+              (merge project-data { status: "completed" })
+            )
+            (print {event: "funds_withdrawn", id: id, amount: available-funds})
+            (ok true)
+          )
+        failure (err ERROR_TRANSFER_FAILED)
+      )
+    )
+  )
+)
+
+;; Initiates a time-locked withdrawal process for large amounts
+(define-public (request-large-withdrawal (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+        (funding-goal (get funding-goal project-data))
+        (available-funds (get current-funding project-data))
+        (project-status (get status project-data))
+      )
+      ;; Only project creator can request withdrawal
+      (asserts! (is-eq tx-sender project-creator) (err ERROR_PERMISSION_DENIED))
+      ;; Can only withdraw from active projects
+      (asserts! (is-eq project-status "active") (err ERROR_PROJECT_ALREADY_CLOSED))
+      ;; Must have reached funding goal
+      (asserts! (>= available-funds funding-goal) (err ERROR_INSUFFICIENT_FUNDS))
+
+      ;; If large withdrawal, apply timelock
+      (if (>= available-funds u1000000000)
+        (begin
+          (map-set WithdrawalRequests
+            { id: id }
+            {
+              request-block: block-height,
+              withdrawal-amount: available-funds
+            }
+          )
+          (print {event: "withdrawal_requested", id: id, amount: available-funds})
+          (ok true)
+        )
+        ;; For smaller amounts, proceed with immediate withdrawal
+        (withdraw-project-funds id)
+      )
+    )
+  )
+)
