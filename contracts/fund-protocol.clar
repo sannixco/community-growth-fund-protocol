@@ -300,3 +300,76 @@
   )
 )
 
+;; Contribution function with rate limiting
+(define-public (contribute-with-rate-limit (id uint) (contribution-amount uint))
+  (begin
+    (asserts! (> contribution-amount u0) (err ERROR_FUNDING_PARAMETER))
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (rate-data (default-to 
+                          { last-contribution-block: u0, contribution-count: u0 } 
+                          (map-get? ContributionRateLimit { backer: tx-sender })))
+        (previous-block (get last-contribution-block rate-data))
+        (current-transactions (get contribution-count rate-data))
+        (window-expired (> (- block-height previous-block) u72))
+      )
+      ;; Check rate limits
+      (asserts! (or window-expired (< current-transactions u5)) (err ERROR_RATE_LIMIT_EXCEEDED))
+
+      ;; Update rate limit tracking
+      (map-set ContributionRateLimit
+        { backer: tx-sender }
+        {
+          last-contribution-block: block-height,
+          contribution-count: (if window-expired u1 (+ current-transactions u1))
+        }
+      )
+
+      ;; Proceed with regular contribution function
+      (contribute-to-project id contribution-amount)
+    )
+  )
+)
+
+;; Enhanced contribution function with additional security
+(define-public (secured-contribution (id uint) (contribution-amount uint))
+  (begin
+    (asserts! (> contribution-amount u0) (err ERROR_FUNDING_PARAMETER))
+    (asserts! (<= contribution-amount u50000000000) (err ERROR_CONTRIBUTION_EXCEEDS_LIMIT))
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-status (get status project-data))
+        (total-funding (get current-funding project-data))
+        (new-funding-total (+ total-funding contribution-amount))
+        (backer-data (default-to { contribution-amount: u0 } 
+                        (map-get? FundingContributions { id: id, backer: tx-sender })))
+        (previous-contribution (get contribution-amount backer-data))
+        (backer-total-contribution (+ previous-contribution contribution-amount))
+      )
+      ;; Check contribution limits for individual backer
+      (asserts! (<= backer-total-contribution u50000000000) (err ERROR_CONTRIBUTION_EXCEEDS_LIMIT))
+      (asserts! (can-accept-funding project-status) (err ERROR_PROJECT_ALREADY_CLOSED))
+      (asserts! (<= block-height (get end-block project-data)) (err ERROR_PROJECT_ALREADY_CLOSED))
+
+      (match (stx-transfer? contribution-amount tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set Projects
+              { id: id }
+              (merge project-data { current-funding: new-funding-total })
+            )
+            (map-set FundingContributions
+              { id: id, backer: tx-sender }
+              { contribution-amount: backer-total-contribution }
+            )
+            (print {event: "secured_contribution_received", id: id, backer: tx-sender, amount: contribution-amount})
+            (ok true)
+          )
+        failure (err ERROR_TRANSFER_FAILED)
+      )
+    )
+  )
+)
