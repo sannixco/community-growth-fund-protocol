@@ -626,3 +626,88 @@
   )
 )
 
+;; Updates project diversity requirements
+(define-public (verify-backer-diversity (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+        (project-status (get status project-data))
+        (backer-data (default-to { distinct-backers: u0 } (map-get? UniqueBackerCount { id: id })))
+        (distinct-backers (get distinct-backers backer-data))
+      )
+      ;; Only callable by contract administrator or project creator
+      (asserts! (or (is-eq tx-sender CONTRACT_ADMINISTRATOR) (is-eq tx-sender project-creator)) (err ERROR_PERMISSION_DENIED))
+      ;; Only for active projects
+      (asserts! (is-eq project-status "active") (err ERROR_PROJECT_ALREADY_CLOSED))
+
+      ;; Check diversity requirements
+      (asserts! (>= distinct-backers u5) (err ERROR_BACKER_DIVERSITY_INSUFFICIENT))
+
+      ;; Mark project as diversity-verified
+      (map-set Projects
+        { id: id }
+        (merge project-data { status: "verified" })
+      )
+
+      (print {event: "diversity_verification_complete", id: id, distinct-backers: distinct-backers})
+      (ok true)
+    )
+  )
+)
+
+;; Initiates a secure project ownership transfer
+(define-public (request-ownership-transfer (id uint) (new-owner principal))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+      )
+      ;; Only current project creator can transfer ownership
+      (asserts! (is-eq tx-sender project-creator) (err ERROR_PERMISSION_DENIED))
+      ;; Cannot transfer to the zero address
+      (asserts! (not (is-eq new-owner 'SP000000000000000000002Q6VF78)) (err ERROR_OWNERSHIP_TRANSFER_FAILED))
+
+      ;; Store transfer request
+      (map-set OwnershipTransfers
+        { id: id }
+        { proposed-owner: new-owner }
+      )
+
+      (print {event: "ownership_transfer_requested", id: id, current-owner: tx-sender, new-owner: new-owner})
+      (ok true)
+    )
+  ))
+
+;; Completes a project ownership transfer
+(define-public (accept-ownership-transfer (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (transfer-data (unwrap! (map-get? OwnershipTransfers { id: id }) 
+                               (err ERROR_OWNERSHIP_TRANSFER_FAILED)))
+        (new-owner (get proposed-owner transfer-data))
+      )
+      ;; Only the designated new owner can accept transfer
+      (asserts! (is-eq tx-sender new-owner) (err ERROR_PERMISSION_DENIED))
+
+      ;; Update project ownership
+      (map-set Projects
+        { id: id }
+        (merge project-data { creator: new-owner })
+      )
+
+      ;; Clear transfer request
+      (map-delete OwnershipTransfers { id: id })
+
+      (print {event: "ownership_transfer_completed", id: id, new-owner: new-owner})
+      (ok true)
+    )
+  )
+)
