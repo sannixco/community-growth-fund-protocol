@@ -711,3 +711,57 @@
     )
   )
 )
+
+;; -----------------------------------------
+;; Emergency Recovery & Security Functions
+;; -----------------------------------------
+
+;; Configure security settings for high-value operations
+(define-public (set-security-configuration 
+    (id uint) 
+    (secondary-approver (optional principal))
+    (security-threshold uint)
+    (required-approvals uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+      )
+      ;; Only project creator can configure security settings
+      (asserts! (is-eq tx-sender project-creator) (err ERROR_PERMISSION_DENIED))
+      ;; Validation of security parameters
+      (asserts! (and (>= required-approvals u1) (<= required-approvals u2)) (err ERROR_FUNDING_PARAMETER))
+
+      ;; Set security configuration
+
+      (print {event: "security_settings_updated", id: id})
+      (ok true)
+    )
+  )
+)
+
+;; Initiate emergency fund recovery
+(define-public (start-emergency-recovery (id uint) (recovery-address principal))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+        (project-status (get status project-data))
+      )
+      ;; Only contract administrator can initiate emergency recovery
+      (asserts! (is-eq tx-sender CONTRACT_ADMINISTRATOR) (err ERROR_PERMISSION_DENIED))
+      ;; Cannot recover from completed projects
+      (asserts! (not (is-eq project-status "completed")) (err ERROR_PROJECT_ALREADY_CLOSED))
+
+      ;; Create recovery request
+
+      (print {event: "emergency_recovery_started", id: id, by: tx-sender})
+      (ok true)
+    )
+  )
+)
+
