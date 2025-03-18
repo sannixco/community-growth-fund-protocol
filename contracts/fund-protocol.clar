@@ -516,3 +516,113 @@
   )
 )
 
+;; Process refunds for paused projects
+(define-public (request-emergency-refund (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-status (get status project-data))
+        (backer-data (unwrap! (map-get? FundingContributions 
+                                { id: id, backer: tx-sender }) 
+                                (err ERROR_NO_REFUNDABLE_AMOUNT)))
+        (refund-amount (get contribution-amount backer-data))
+      )
+      ;; Verify refund conditions
+      (asserts! (> refund-amount u0) (err ERROR_NO_REFUNDABLE_AMOUNT))
+      ;; Can only refund from paused projects
+      (asserts! (is-eq project-status "paused") (err ERROR_REFUNDS_UNAVAILABLE))
+
+      ;; Process refund
+      (match (as-contract (stx-transfer? refund-amount tx-sender tx-sender))
+        success
+          (begin
+            ;; Update backer record
+            (map-set FundingContributions
+              { id: id, backer: tx-sender }
+              { contribution-amount: u0 }
+            )
+            ;; Update project total
+            (map-set Projects
+              { id: id }
+              (merge project-data 
+                { current-funding: (- (get current-funding project-data) refund-amount) }
+              )
+            )
+            (print {event: "emergency_refund_processed", id: id, backer: tx-sender, amount: refund-amount})
+            (ok true)
+          )
+        failure (err ERROR_TRANSFER_FAILED)
+      )
+    )
+  )
+)
+
+;; -----------------------------------------
+;; Project Status & Governance
+;; -----------------------------------------
+
+;; Updates project status based on funding results
+(define-public (finalize-project-status (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+        (funding-goal (get funding-goal project-data))
+        (current-funding (get current-funding project-data))
+        (project-status (get status project-data))
+        (expiration-block (get end-block project-data))
+        (reputation-data (default-to 
+                    { completed-projects: u0, unsuccessful-projects: u0, funds-raised: u0 } 
+                    (map-get? CreatorReputation { creator: project-creator })))
+      )
+      ;; Only contract administrator or project creator can finalize
+      (asserts! (or (is-eq tx-sender CONTRACT_ADMINISTRATOR) (is-eq tx-sender project-creator)) (err ERROR_PERMISSION_DENIED))
+      ;; Can only finalize active projects past expiration
+      (asserts! (is-eq project-status "active") (err ERROR_PROJECT_ALREADY_CLOSED))
+      (asserts! (>= block-height expiration-block) (err ERROR_PROJECT_ALREADY_CLOSED))
+
+      ;; Determine project outcome and update reputation
+      (if (>= current-funding funding-goal)
+        ;; Project succeeded
+        (begin
+          (map-set CreatorReputation
+            { creator: project-creator }
+            {
+              completed-projects: (+ (get completed-projects reputation-data) u1),
+              unsuccessful-projects: (get unsuccessful-projects reputation-data),
+              funds-raised: (+ (get funds-raised reputation-data) current-funding)
+            }
+          )
+          (map-set Projects
+            { id: id }
+            (merge project-data { status: "completed" })
+          )
+          (print {event: "project_successful", id: id, amount: current-funding})
+          (ok true)
+        )
+        ;; Project failed
+        (begin
+          (map-set CreatorReputation
+            { creator: project-creator }
+            {
+              completed-projects: (get completed-projects reputation-data),
+              unsuccessful-projects: (+ (get unsuccessful-projects reputation-data) u1),
+              funds-raised: (get funds-raised reputation-data)
+            }
+          )
+          (map-set Projects
+            { id: id }
+            (merge project-data { status: "failed" })
+          )
+          (print {event: "project_failed", id: id, amount: current-funding})
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
