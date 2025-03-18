@@ -230,3 +230,73 @@
       (ok true)
     )
   ))
+
+;; Adds development phases to a project
+(define-public (create-project-phase 
+    (id uint) 
+    (phase-description (string-utf8 200))
+    (phase-funding uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (asserts! (> phase-funding u0) (err ERROR_FUNDING_PARAMETER))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+        (project-status (get status project-data))
+        (phase-data (default-to { phase-count: u0 } (map-get? PhaseCounter { id: id })))
+        (next-phase-id (+ (get phase-count phase-data) u1))
+      )
+      ;; Only project creator can add phases
+      (asserts! (is-eq tx-sender project-creator) (err ERROR_PERMISSION_DENIED))
+      ;; Can only add phases to active projects
+      (asserts! (is-eq project-status "active") (err ERROR_PROJECT_ALREADY_CLOSED))
+      (map-set PhaseCounter
+        { id: id }
+        { phase-count: next-phase-id }
+      )
+      (print {event: "phase_created", id: id, phase-id: next-phase-id})
+      (ok true)
+    )
+  )
+)
+
+
+;; -----------------------------------------
+;; Funding & Financial Operations
+;; -----------------------------------------
+
+;; Standard contribution function
+(define-public (contribute-to-project (id uint) (contribution-amount uint))
+  (begin
+    (asserts! (> contribution-amount u0) (err ERROR_FUNDING_PARAMETER))
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-status (get status project-data))
+        (total-funding (get current-funding project-data))
+        (new-funding-total (+ total-funding contribution-amount))
+      )
+      (asserts! (can-accept-funding project-status) (err ERROR_PROJECT_ALREADY_CLOSED))
+      (asserts! (<= block-height (get end-block project-data)) (err ERROR_PROJECT_ALREADY_CLOSED))
+      (match (stx-transfer? contribution-amount tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set Projects
+              { id: id }
+              (merge project-data { current-funding: new-funding-total })
+            )
+            (map-set FundingContributions
+              { id: id, backer: tx-sender }
+              { contribution-amount: contribution-amount }
+            )
+            (print {event: "contribution_received", id: id, backer: tx-sender, amount: contribution-amount})
+            (ok true)
+          )
+        failure (err ERROR_TRANSFER_FAILED)
+      )
+    )
+  )
+)
+
