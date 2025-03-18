@@ -443,3 +443,76 @@
     )
   )
 )
+
+;; Completes a time-locked withdrawal
+(define-public (complete-timelocked-withdrawal (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-creator (get creator project-data))
+        (project-status (get status project-data))
+        (withdrawal-data (unwrap! (map-get? WithdrawalRequests { id: id }) (err ERROR_TRANSFER_FAILED)))
+        (request-time (get request-block withdrawal-data))
+        (withdrawal-amount (get withdrawal-amount withdrawal-data))
+      )
+      ;; Only project creator can execute withdrawal
+      (asserts! (is-eq tx-sender project-creator) (err ERROR_PERMISSION_DENIED))
+      ;; Can only withdraw from active projects
+      (asserts! (is-eq project-status "active") (err ERROR_PROJECT_ALREADY_CLOSED))
+      ;; Verify timelock period has passed
+      (asserts! (>= block-height (+ request-time u144)) (err ERROR_PERMISSION_DENIED))
+
+      ;; Execute the withdrawal
+      (match (as-contract (stx-transfer? withdrawal-amount tx-sender project-creator))
+        success
+          (begin
+            (map-set Projects
+              { id: id }
+              (merge project-data { status: "completed" })
+            )
+            (map-delete WithdrawalRequests { id: id })
+            (print {event: "timelocked_withdrawal_completed", id: id, amount: withdrawal-amount})
+            (ok true)
+          )
+        failure (err ERROR_TRANSFER_FAILED)
+      )
+    )
+  )
+)
+
+;; Allows contributors to reclaim funds from expired projects
+(define-public (reclaim-contribution (id uint))
+  (begin
+    (asserts! (does-project-exist id) (err ERROR_NONEXISTENT_PROJECT))
+    (let
+      (
+        (project-data (unwrap! (map-get? Projects { id: id }) (err ERROR_NONEXISTENT_PROJECT)))
+        (project-status (get status project-data))
+        (expiration-block (get end-block project-data))
+      )
+      (asserts! (is-eq project-status "active") (err ERROR_PROJECT_ALREADY_CLOSED))
+      (asserts! (> block-height expiration-block) (err ERROR_PROJECT_ALREADY_CLOSED))
+      (let
+        (
+          (backer-record (unwrap! (map-get? FundingContributions { id: id, backer: tx-sender }) (err ERROR_PERMISSION_DENIED)))
+          (refund-amount (get contribution-amount backer-record))
+        )
+        (match (as-contract (stx-transfer? refund-amount tx-sender tx-sender))
+          success
+            (begin
+              (map-set FundingContributions
+                { id: id, backer: tx-sender }
+                { contribution-amount: u0 }
+              )
+              (print {event: "contribution_refunded", id: id, backer: tx-sender, amount: refund-amount})
+              (ok true)
+            )
+          failure (err ERROR_TRANSFER_FAILED)
+        )
+      )
+    )
+  )
+)
+
